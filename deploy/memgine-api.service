@@ -1,0 +1,13 @@
+[Unit]
+Description=Memgine memory API
+
+[Service]
+Type=exec
+WorkingDirectory=%h/memgine
+Environment=MEMGINE_CONFIG=%h/memgine/memgine.ini
+ExecStart=/usr/bin/python3 %h/memgine/server.py
+Restart=on-failure
+RestartSec=3s
+
+[Install]
+WantedBy=default.target

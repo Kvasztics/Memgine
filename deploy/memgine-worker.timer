@@ -1,0 +1,10 @@
+[Unit]
+Description=Process queued Memgine messages
+
+[Timer]
+OnStartupSec=15s
+OnUnitInactiveSec=15s
+AccuracySec=1s
+
+[Install]
+WantedBy=timers.target

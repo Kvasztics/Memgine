@@ -1,0 +1,15 @@
+[Unit]
+Description=Memgine OpenAI-compatible chat proxy
+Wants=memgine-api.service
+After=memgine-api.service
+
+[Service]
+Type=exec
+WorkingDirectory=%h/memgine
+Environment=MEMGINE_CONFIG=%h/memgine/memgine.ini
+ExecStart=/usr/bin/python3 %h/memgine/chat_proxy.py
+Restart=on-failure
+RestartSec=3s
+
+[Install]
+WantedBy=default.target

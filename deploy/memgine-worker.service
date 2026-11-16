@@ -1,0 +1,9 @@
+[Unit]
+Description=Memgine memory queue worker
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/memgine
+EnvironmentFile=-%h/.config/memgine/worker.env
+ExecStart=/usr/bin/python3 %h/memgine/server.py work
+TimeoutStartSec=5min
