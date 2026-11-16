@@ -10,10 +10,15 @@ import sys
 import subprocess
 
 import splade
+import ui_settings
+import hmac
+import os
 from urllib.request import Request, urlopen
 from contextlib import closing
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from uuid import uuid4
+from pathlib import Path
+from datetime import datetime
 from time import perf_counter
 
 LOG = logging.getLogger("memgine")
@@ -128,6 +133,82 @@ def replacement(db, scope, proposal):
              AND id=? AND kind=?""",
         (*scope, proposal["memory_id"], proposal["kind"]),
     ).fetchone()
+
+
+def list_memories(db, client, body):
+    filters = ["client=?"]
+    params = [client]
+    for field in ("user_id", "model_id", "conversation_id", "kind"):
+        if body.get(field):
+            filters.append(f"{field}=?")
+            params.append(required(body, field))
+    query = body.get("query", "")
+    if query:
+        filters.append("instr(lower(text), lower(?)) > 0")
+        params.append(required(body, "query", 500))
+    if body.get("include_inactive") is not True:
+        filters.append("active=1")
+    offset = body.get("offset", 0)
+    if type(offset) is not int or not 0 <= offset <= 1000000:
+        raise ValueError("Invalid offset")
+    fields = ["id", "user_id", "model_id", "conversation_id", "kind", "text", "active"]
+    rows = db.execute(
+        f"SELECT {', '.join(fields)} FROM memories WHERE {' AND '.join(filters)} "
+        "ORDER BY rowid DESC LIMIT 26 OFFSET ?", (*params, offset),
+    ).fetchall()
+    return 200, {"memories": [dict(zip(fields, row)) for row in rows[:25]], "more": len(rows) > 25}
+
+
+def delete_memory(db, client, body):
+    memory_id = required(body, "id")
+    with db:
+        db.execute("BEGIN IMMEDIATE")
+        deleted = db.execute(
+            "DELETE FROM memories WHERE client=? AND id=?", (client, memory_id),
+        ).rowcount
+        if not deleted:
+            return 404, {"error": "Memory not found"}
+        db.execute("DELETE FROM splade_vectors WHERE memory_id=?", (memory_id,))
+    LOG.info("memory_deleted id=%s", memory_id)
+    return 200, {"id": memory_id}
+
+
+def edit_memory(db, client, body):
+    memory_id = required(body, "id")
+    text = required(body, "text", 500).strip()
+    with db:
+        db.execute("BEGIN IMMEDIATE")
+        row = db.execute(
+            """SELECT user_id, model_id, conversation_id, kind, text, active
+               FROM memories WHERE client=? AND id=?""", (client, memory_id),
+        ).fetchone()
+        if row is None:
+            return 404, {"error": "Memory not found"}
+        user, model, conversation, kind, old_text, active = row
+        if not active:
+            return 409, {"error": "Memory has already been replaced"}
+        if text == old_text:
+            return 200, {"id": memory_id}
+        new_id = uuid4().hex
+        db.execute("UPDATE memories SET active=0 WHERE client=? AND id=?", (client, memory_id))
+        db.execute(
+            "INSERT INTO memories VALUES (?, ?, ?, ?, ?, ?, ?, 1)",
+            (new_id, client, user, model, conversation, kind, text),
+        )
+    LOG.info("memory_edited previous_id=%s id=%s", memory_id, new_id)
+    return 200, {"id": new_id}
+
+
+def review_scopes(db, client, body):
+    rows = db.execute(
+        """SELECT user_id, model_id, COUNT(*) FROM jobs
+           WHERE client=? AND status='review'
+           GROUP BY user_id, model_id ORDER BY user_id, model_id""", (client,),
+    )
+    return 200, {"scopes": [
+        {"user_id": user, "model_id": model, "total": count}
+        for user, model, count in rows
+    ]}
 
 
 def list_reviews(db, client, body):
@@ -285,6 +366,46 @@ def work(database):
     return updated
 
 
+def read_logs(db, client, body):
+    units = {
+        "api": "memgine-api.service",
+        "worker": "memgine-worker.service",
+        "proxy": "memgine-proxy.service",
+        "extractor": "memgine-extractor.service",
+    }
+    levels = {"all": 7, "info": 6, "warning": 4, "error": 3}
+    source, level = required(body, "source"), required(body, "level")
+    if source not in units or level not in levels:
+        raise ValueError("Invalid log filter")
+    try:
+        result = subprocess.run(
+            ["journalctl", "--user", "--unit", units[source], "--lines=300",
+             "--output=json", "--no-pager"],
+            capture_output=True, text=True, errors="replace", timeout=5, check=True,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return 503, {"error": "Service journal unavailable"}
+    lines = []
+    for raw in result.stdout.splitlines():
+        entry = json.loads(raw)
+        message = entry.get("MESSAGE", "")
+        if not isinstance(message, str):
+            continue
+        priority = int(entry.get("PRIORITY", "6"))
+        match = re.match(r"^\d{4}-\d\d-\d\d \S+ (DEBUG|INFO|WARNING|ERROR|CRITICAL) memgine ", message)
+        if match:
+            priority = {"DEBUG": 7, "INFO": 6, "WARNING": 4, "ERROR": 3, "CRITICAL": 2}[match[1]]
+        if priority <= levels[level]:
+            timestamp = int(entry.get("__REALTIME_TIMESTAMP", "0")) / 1_000_000
+            lines.append(f"{datetime.fromtimestamp(timestamp).isoformat(timespec='seconds')}  {message}"[:2000])
+    return 200, {"lines": lines[-100:]}
+
+
+def save_ui_settings(db, client, body):
+    ui_settings.save(body.get("changes"))
+    return 200, {"saved": True}
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_request(self, code="-", size="-"):
         LOG.debug("http status=%s", code)
@@ -298,17 +419,60 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def do_GET(self):
+        asset = {
+            "/": ("index.html", "text/html"),
+            "/ui/style.css": ("style.css", "text/css"),
+            "/ui/app.js": ("app.js", "text/javascript"),
+            "/ui/memgine.png": ("memgine.png", "image/png"),
+        }.get(self.path)
+        if asset is None:
+            self.respond(404, {"error": "Endpoint not found"})
+            return
+        filename, media_type = asset
+        data = (Path(__file__).resolve().parent / "ui" / filename).read_bytes()
+        self.send_response(200)
+        self.send_header("Content-Type", media_type if media_type == "image/png" else media_type + "; charset=utf-8")
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Security-Policy", "default-src 'self'; frame-ancestors 'none'; base-uri 'none'")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.end_headers()
+        self.wfile.write(data)
+
     def do_POST(self):
         supplied = self.headers.get("Authorization", "").encode()
         client = self.server.clients.get(hashlib.sha256(supplied).digest())
         if client is None:
             self.respond(401, {"error": "Unauthorized"})
             return
+        if self.path == "/v1/admin/logs" and (len(self.server.clients) != 1 or client != setting("MEMGINE_CLIENT")):
+            self.respond(403, {"error": "Instance operator access required"})
+            return
+        if self.path.startswith("/v1/admin/settings"):
+            secret = os.environ.get("MEMGINE_SETTINGS_KEY", "") or ui_settings.read_config().get(
+                "ui", "settings_key", fallback=""
+            )
+            supplied_operator = self.headers.get("X-Memgine-Settings-Key", "")
+            if (len(self.server.clients) != 1 or client != setting("MEMGINE_CLIENT")
+                    or not secret or not hmac.compare_digest(secret.encode(), supplied_operator.encode("latin-1"))):
+                self.respond(403, {"error": "Settings operator key required"})
+                return
         operation = {
+            "/v1/admin/logs": read_logs,
+            "/v1/admin/settings": lambda db, client, body: (200, {"sections": ui_settings.fields()}),
+            "/v1/admin/settings/save": save_ui_settings,
+            "/v1/admin/settings/browse": lambda db, client, body: (
+                200, ui_settings.browse(body.get("path", ""), body.get("kind"))
+            ),
             "/v1/memory/search": search,
+            "/v1/memory/list": list_memories,
+            "/v1/memory/edit": edit_memory,
+            "/v1/memory/delete": delete_memory,
             "/v1/memory/ingest": ingest,
             "/v1/memory/review": review,
             "/v1/memory/reviews": list_reviews,
+            "/v1/memory/review-scopes": review_scopes,
         }.get(self.path)
         if operation is None:
             self.respond(404, {"error": "Endpoint not found"})
@@ -326,7 +490,7 @@ class Handler(BaseHTTPRequestHandler):
         except ValueError as error:
             self.respond(400, {"error": str(error)})
             return
-        except sqlite3.Error as error:
+        except (sqlite3.Error, OSError) as error:
             LOG.error("storage_unavailable error=%s", type(error).__name__)
             self.respond(503, {"error": "Storage unavailable"})
             return

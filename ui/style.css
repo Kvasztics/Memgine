@@ -1,0 +1,80 @@
+:root {
+  color-scheme: dark;
+  font-family: "Instrument Sans", system-ui, sans-serif;
+  color: #e9eef5;
+  background: #11161e;
+  --surface: #191f29;
+  --line: #344356;
+  --muted: #a9bbcf;
+  --mint: #75d7c1;
+}
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+body { margin: 0; }
+main { max-width: 1240px; margin: auto; padding: 32px clamp(18px, 5vw, 60px); }
+header { display: flex; align-items: center; justify-content: space-between; gap: 16px; border-bottom: 1px solid var(--line); padding-bottom: 20px; }
+h1, h2, h3 { margin: 0 0 12px; }
+header h1 { margin: 0; }
+.brand-logo { display: block; width: min(300px, 100%); height: auto; }
+h2 { margin-top: 28px; }
+h3, label { font-size: 1rem; font-weight: 650; }
+a { color: var(--mint); }
+.panel { border: 1px solid var(--line); border-radius: 14px; background: var(--surface); padding: 20px; }
+.connection, .actions { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
+.cards { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; margin: 16px 0; }
+.panel p { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.55; margin-bottom: 0; }
+#previous-panel { margin-bottom: 16px; }
+#status { color: var(--muted); min-height: 1.5em; }
+input, textarea, select, button { font: inherit; color: inherit; border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; background: #121922; }
+textarea { display: block; width: 100%; resize: vertical; margin-top: 10px; line-height: 1.55; }
+input { max-width: 100%; }
+select { max-width: 100%; }
+button { cursor: pointer; background: #233041; }
+button:disabled { opacity: .6; cursor: wait; }
+.primary { background: var(--mint); color: #102524; font-weight: 700; }
+:focus-visible { outline: 2px solid var(--mint); outline-offset: 3px; }
+@media (max-width: 720px) {
+  .cards { grid-template-columns: 1fr; }
+  .connection label { width: 100%; }
+}
+
+nav { display: flex; flex-wrap: wrap; gap: 8px; }
+nav button[aria-pressed="true"] { color: var(--mint); border-color: var(--mint); }
+#filters label { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+#filters label input:not([type="checkbox"]) { width: 180px; }
+#memory-status, .memory-card .memory-meta { color: var(--muted); }
+.memory-card { margin-bottom: 12px; }
+.memory-card .memory-meta { margin: 0; font-size: .875rem; }
+.memory-card button { margin-top: 10px; }
+
+#log-output {
+  max-height: 60vh;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font: .875rem/1.55 "IBM Plex Mono", monospace;
+}
+#log-status { color: var(--muted); }
+
+.memory-delete { color: #ffaaa4; margin-inline-start: 8px; }
+.log-start { color: var(--mint); }
+.log-warning { color: #f4ca73; }
+.log-error { color: #ff9d98; }
+.log-important { font-style: italic; }
+
+#settings-fields { display: grid; gap: 16px; margin: 20px 0; }
+#settings-fields fieldset { min-width: 0; }
+#settings-fields legend { color: var(--mint); padding: 0 8px; }
+.setting-row { display: grid; grid-template-columns: minmax(140px, 33%) minmax(0, 1fr) auto; align-items: center; gap: 8px; margin: 8px 0; }
+.setting-row label { overflow-wrap: anywhere; }
+.setting-row > :is(input, select) { min-width: 0; width: 100%; }
+.setting-row > :is(input, select):last-child { grid-column: 2 / -1; }
+#path-browser { width: min(660px, 92vw); background: var(--surface); color: inherit; border: 1px solid var(--line); border-radius: 14px; }
+#path-browser::backdrop { background: #0009; }
+#path-entries { display: grid; gap: 5px; max-height: 50vh; overflow: auto; margin-bottom: 12px; }
+#path-entries button { text-align: left; overflow-wrap: anywhere; }
+@media (max-width: 640px) {
+  .setting-row { grid-template-columns: minmax(0, 1fr) auto; }
+  .setting-row label { grid-column: 1 / -1; }
+  .setting-row > :is(input, select):last-child { grid-column: 1 / -1; }
+}

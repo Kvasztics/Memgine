@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="hu">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Memgine</title>
+  <link rel="stylesheet" href="/ui/style.css">
+  <script defer src="/ui/app.js"></script>
+</head>
+<body>
+<main>
+  <header>
+    <h1><img class="brand-logo" src="/ui/memgine.png" alt="Memgine" width="300" height="102"></h1>
+    <nav aria-label="Memgine nézetek">
+      <button id="show-memories" type="button" aria-pressed="true">Emlékek</button>
+      <button id="show-reviews" type="button" aria-pressed="false">Jóváhagyások</button>
+      <button id="show-logs" type="button" aria-pressed="false">Naplók</button>
+      <button id="show-settings" type="button" aria-pressed="false">Beállítások</button>
+    </nav>
+  </header>
+    <form id="connect" class="panel connection">
+      <label for="key">Memgine API-kulcs</label>
+      <input id="key" type="password" autocomplete="off" required>
+      <button type="submit">Csatlakozás</button>
+    </form>
+    <p id="status" role="status"></p>
+  <section id="memories" aria-labelledby="memory-title">
+    <h2 id="memory-title">Emlékek</h2>
+    <form id="filters" class="panel connection" hidden>
+      <label>Keresés <input name="query" type="search" maxlength="500"></label>
+      <label>Felhasználó <input name="user_id" maxlength="256"></label>
+      <label>Modell <input name="model_id" maxlength="256"></label>
+      <label>Beszélgetés <input name="conversation_id" maxlength="256"></label>
+      <label>Típus
+        <select name="kind">
+          <option value="">Mind</option><option value="project">Projekt</option>
+          <option value="profile">Profil</option><option value="context">Kontextus</option>
+        </select>
+      </label>
+      <label><input name="include_inactive" type="checkbox"> Korábbi emlékek is</label>
+      <button type="submit">Szűrés</button>
+    </form>
+    <p id="memory-status" role="status"></p>
+    <div id="memory-list"></div>
+    <div id="memory-pages" class="actions" hidden>
+      <button id="memory-back" type="button">Előző oldal</button>
+      <button id="memory-next" type="button">Következő oldal</button>
+    </div>
+  </section>
+  <section id="reviews" aria-labelledby="review-title" hidden>
+    <h2 id="review-title">Jóváhagyások</h2>
+    <button id="refresh-reviews" type="button" hidden>Várólista frissítése</button>
+    <div id="queue" hidden>
+      <label for="scope">Felhasználó és modell</label>
+      <select id="scope"></select>
+      <form id="review" hidden>
+        <div class="cards">
+          <article class="panel">
+            <h3>Eredeti üzenet</h3>
+            <p id="source"></p>
+          </article>
+          <div class="panel">
+            <label for="text">Javasolt emlék</label>
+            <textarea id="text" rows="5" maxlength="500" required></textarea>
+          </div>
+        </div>
+        <article id="previous-panel" class="panel" hidden>
+          <h3>Korábbi emlék</h3>
+          <p id="previous"></p>
+        </article>
+        <div class="actions">
+          <label for="kind">Emléktípus</label>
+          <select id="kind">
+            <option value="project">Projekt</option>
+            <option value="profile">Profil</option>
+            <option value="context">Kontextus</option>
+          </select>
+          <label id="mode-label" for="mode">Mentés módja</label>
+          <select id="mode">
+            <option value="add">Külön emlékként</option>
+            <option value="supersede">Korábbi emlék lecserélése</option>
+          </select>
+          <button type="submit" value="dismiss" formnovalidate>Elvetés</button>
+          <button class="primary" type="submit" value="approve">Jóváhagyás</button>
+        </div>
+      </form>
+    </div>
+  </section>
+  <section id="logs" aria-labelledby="logs-title" hidden>
+    <h2 id="logs-title">Naplók</h2>
+    <form id="log-filters" class="panel connection">
+      <label for="log-source">Szolgáltatás</label>
+      <select id="log-source">
+        <option value="api">Memória-API</option>
+        <option value="worker">Feldolgozó</option>
+        <option value="proxy">Chatproxy</option>
+        <option value="extractor">Helyi kivonatoló</option>
+      </select>
+      <label for="log-level">Naplószint</label>
+      <select id="log-level">
+        <option value="all">Minden szint</option>
+        <option value="info">Információ és súlyosabb</option>
+        <option value="warning">Figyelmeztetés és hiba</option>
+        <option value="error">Hiba</option>
+      </select>
+      <button type="submit">Napló frissítése</button>
+    </form>
+    <p id="log-status" role="status"></p>
+    <pre id="log-output" class="panel" hidden></pre>
+  </section>
+  <section id="settings" hidden>
+    <h2>Beállítások</h2>
+    <form id="settings-connect" class="panel connection">
+      <label for="settings-key">Beállítások kezelőkulcsa</label>
+      <input id="settings-key" type="password" autocomplete="off" required>
+      <button type="submit">Beállítások megnyitása</button>
+    </form>
+    <p id="settings-status" role="status"></p>
+    <form id="settings-form" hidden>
+      <div id="settings-fields"></div>
+      <button class="primary" type="submit">Beállítások mentése</button>
+    </form>
+    <dialog id="path-browser" aria-labelledby="path-title">
+      <h3 id="path-title">Tallózás a Memgine szerveren</h3>
+      <p id="path-current" role="status"></p>
+      <div id="path-entries"></div>
+      <div class="actions">
+        <button id="path-up" type="button">Feljebb</button>
+        <button id="path-select" type="button" hidden>Mappa kiválasztása</button>
+        <form method="dialog"><button>Bezárás</button></form>
+      </div>
+    </dialog>
+  </section>
+</main>
+</body>
+</html>

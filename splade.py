@@ -64,12 +64,12 @@ def index(db):
             print(f"Memgine SPLADE indexing failed: {type(error).__name__}", file=sys.stderr)
             continue
         with db:
-            db.execute(
-                """INSERT INTO splade_vectors VALUES (?, ?, ?)
+            indexed += db.execute(
+                """INSERT INTO splade_vectors (memory_id, version, weights)
+                   SELECT ?, ?, ? WHERE EXISTS (SELECT 1 FROM memories WHERE id=? AND active=1)
                    ON CONFLICT(memory_id) DO UPDATE SET version=excluded.version, weights=excluded.weights""",
-                (memory_id, config[0], json.dumps(weights)),
-            )
-        indexed += 1
+                (memory_id, config[0], json.dumps(weights), memory_id),
+            ).rowcount
     return indexed
 
 
