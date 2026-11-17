@@ -14,7 +14,7 @@ async function post(route, body, base = "/v1/memory/") {
     body: JSON.stringify(body),
   });
   const data = await response.json();
-  if (!response.ok) throw new Error("HTTP " + response.status + " · " + (data.error ?? "Sikertelen kérés"));
+  if (!response.ok) throw new Error("HTTP " + response.status + " · " + (data.error ?? tr("Sikertelen kérés")));
   return data;
 }
 
@@ -23,16 +23,20 @@ async function loadReview() {
   current = null;
   const selected = scopes[Number(scope.value)];
   if (!selected) {
-    byId("status").textContent = "Nincs jóváhagyásra váró emlék.";
+    byId("status").textContent = tr("Nincs jóváhagyásra váró emlék.");
     return;
   }
   const {user_id, model_id} = selected;
   const {total, next} = await post("reviews", {user_id, model_id});
-  byId("status").textContent = total ? total + " jóváhagyásra vár ebben a hatókörben." : "Ez a várólista üres.";
+  byId("status").textContent = total ? total + tr(" jóváhagyásra vár ebben a hatókörben.") : tr("Ez a várólista üres.");
   if (!next) return;
   current = {user_id, model_id, job_id: next.job_id};
   byId("source").textContent = next.source;
   byId("text").value = next.proposal.text;
+  const eventDate = next.proposal.event_date;
+  byId("review-event").hidden = !eventDate;
+  byId("review-event-date").textContent = eventDate ?? "";
+  byId("review-event-date").dateTime = eventDate ?? "";
   byId("kind").value = next.proposal.kind;
   const replace = next.proposal.action === "supersede" && next.previous !== null;
   byId("previous-panel").hidden = !replace;
@@ -84,7 +88,7 @@ byId("connect").addEventListener("submit", (event) => {
     byId("filters").hidden = false;
     byId("key").value = "";
     byId("refresh-reviews").hidden = false;
-    byId("status").textContent = "Csatlakozva.";
+    byId("status").textContent = tr("Csatlakozva.");
     if (!byId("reviews").hidden) await loadQueue();
     else reviewsLoaded = false;
     if (!byId("logs").hidden) await loadLogs();
@@ -107,7 +111,7 @@ review.addEventListener("submit", (event) => {
     review.hidden = true;
     current = null;
     await loadQueue(payload);
-    byId("status").textContent = (decision === "approve" ? "Emlék mentve. " : "Javaslat elvetve. ") + byId("status").textContent;
+    byId("status").textContent = (decision === "approve" ? tr("Emlék mentve. ") : tr("Javaslat elvetve. ")) + byId("status").textContent;
   });
 });
 
@@ -128,16 +132,29 @@ function memoryCard(item) {
   const meta = document.createElement("p");
   const kinds = {project: "Projekt", profile: "Profil", context: "Kontextus"};
   meta.className = "memory-meta";
-  meta.textContent = [kinds[item.kind] ?? item.kind, item.active ? "Aktív" : "Korábbi",
-    item.user_id, item.model_id, item.conversation_id].filter(Boolean).join(" · ");
+  const kind = document.createElement("span");
+  const state = document.createElement("span");
+  localize(kind, kinds[item.kind] ?? item.kind);
+  const expired = item.expires_at != null && item.expires_at * 1000 <= Date.now();
+  localize(state, expired ? "Lejárt" : item.active ? "Aktív" : "Korábbi");
+  meta.append(kind, " · ", state, " · ",
+    [item.user_id, item.model_id, item.conversation_id].filter(Boolean).join(" · "));
   card.append(meta);
+  if (item.event_date) {
+    const label = document.createElement("span");
+    const date = document.createElement("time");
+    localize(label, "Esemény dátuma");
+    date.dateTime = item.event_date;
+    date.textContent = item.event_date;
+    meta.append(" · ", label, " ", date);
+  }
 
   const remove = document.createElement("button");
   remove.type = "button";
   remove.className = "memory-delete";
-  remove.textContent = "Emlék törlése";
+  localize(remove, "Emlék törlése");
   remove.addEventListener("click", () => {
-    if (!window.confirm("Végleg törlöd ezt az emlékváltozatot?")) return;
+    if (!window.confirm(tr("Végleg törlöd ezt az emlékváltozatot?"))) return;
     run(async () => {
       try {
         await post("delete", {id: item.id});
@@ -146,7 +163,7 @@ function memoryCard(item) {
         if (!byId("memory-list").children.length && memoryOffset > 0) {
           await loadMemories(memoryOffset - 25);
         }
-        memoryStatus("Emlék törölve. " + byId("memory-status").textContent);
+        memoryStatus(tr("Emlék törölve. ") + byId("memory-status").textContent);
       } catch (error) {
         memoryStatus(error.message);
       }
@@ -154,7 +171,7 @@ function memoryCard(item) {
   });
 
 
-  if (!item.active) {
+  if (!item.active || expired) {
     const content = document.createElement("p");
     content.textContent = item.text;
     card.append(content, remove);
@@ -162,23 +179,42 @@ function memoryCard(item) {
   }
   const form = document.createElement("form");
   const text = document.createElement("textarea");
-  text.setAttribute("aria-label", "Emlék szövege");
+  text.dataset.localeAria = "Emlék szövege";
+  text.setAttribute("aria-label", tr(text.dataset.localeAria));
   text.rows = 2;
   text.maxLength = 500;
   text.required = true;
-  text.value = drafts.get(item.id) ?? item.text;
-  text.addEventListener("input", () => drafts.set(item.id, text.value));
+  const draft = drafts.get(item.id);
+  text.value = draft?.text ?? item.text;
+  const kindSelect = document.createElement("select");
+  const kindLabel = document.createElement("label");
+  kindSelect.id = "memory-kind-" + item.id;
+  kindLabel.htmlFor = kindSelect.id;
+  localize(kindLabel, "Emléktípus");
+  for (const [value, label] of Object.entries(kinds)) {
+    const option = new Option("", value);
+    localize(option, label);
+    option.disabled = value === "project" && !item.conversation_id;
+    kindSelect.append(option);
+  }
+  kindSelect.value = draft?.kind ?? item.kind;
+  const saveDraft = () => drafts.set(item.id, {text: text.value, kind: kindSelect.value});
+  text.addEventListener("input", saveDraft);
+  kindSelect.addEventListener("change", saveDraft);
   const save = document.createElement("button");
   save.type = "submit";
-  save.textContent = "Módosítás mentése";
-  form.append(text, save, remove);
+  localize(save, "Módosítás mentése");
+  const actions = document.createElement("div");
+  actions.className = "actions";
+  actions.append(kindLabel, kindSelect, save, remove);
+  form.append(text, actions);
   form.addEventListener("submit", (event) => {
     event.preventDefault();
     run(async () => {
-      await post("edit", {id: item.id, text: text.value.trim()});
+      await post("edit", {id: item.id, text: text.value.trim(), kind: kindSelect.value});
       drafts.delete(item.id);
       await loadMemories();
-      memoryStatus("Emlék mentve. " + byId("memory-status").textContent);
+      memoryStatus(tr("Emlék mentve. ") + byId("memory-status").textContent);
     });
   });
   card.append(form);
@@ -197,8 +233,8 @@ async function loadMemories(offset = 0) {
   byId("memory-pages").hidden = !offset && !hasMore;
   updatePages();
   memoryStatus(result.memories.length
-    ? (offset + 1) + "–" + (offset + result.memories.length) + ". emlék"
-    : "Nincs találat.");
+    ? (offset + 1) + "–" + (offset + result.memories.length) + tr(". emlék")
+    : tr("Nincs találat."));
 }
 
 byId("filters").addEventListener("submit", (event) => {
@@ -256,16 +292,16 @@ async function loadLogs() {
   output.hidden = true;
   output.textContent = "";
   if (!key) {
-    status.textContent = "A napló megnyitásához add meg az API-kulcsot.";
+    status.textContent = tr("A napló megnyitásához add meg az API-kulcsot.");
     return;
   }
-  status.textContent = "Napló betöltése…";
+  status.textContent = tr("Napló betöltése…");
   try {
     const {lines} = await post("logs", {
       source: byId("log-source").value,
       level: byId("log-level").value,
     }, "/v1/admin/");
-    status.textContent = lines.length ? lines.length + " naplósor" : "Nincs bejegyzés ehhez a szűréshez.";
+    status.textContent = lines.length ? lines.length + tr(" naplósor") : tr("Nincs bejegyzés ehhez a szűréshez.");
     output.replaceChildren(...lines.map((line) => {
       const row = document.createElement("span");
       row.className = logStyle(line);
@@ -295,7 +331,7 @@ let pathInput = null;
 let pathState = null;
 
 async function settingsRequest(action, body = {}) {
-  if (!key) throw new Error("Előbb csatlakozz a Memgine API-kulccsal.");
+  if (!key) throw new Error(tr("Előbb csatlakozz a Memgine API-kulccsal."));
   const response = await fetch("/v1/admin/settings" + action, {
     method: "POST",
     headers: {"Authorization": "Bearer " + key, "Content-Type": "application/json",
@@ -323,14 +359,14 @@ function settingControl(section, field) {
   input.name = field.name;
   input.disabled = field.overridden;
   label.htmlFor = input.id;
-  label.textContent = field.name + (field.overridden ? " (környezeti változó)" : "");
+  label.textContent = field.name + (field.overridden ? tr(" (környezeti változó)") : "");
   if (field.choices) {
     input.append(...field.choices.map((value) => new Option(value)));
   } else {
     input.type = field.secret ? "password" : "text";
     if (field.secret) {
       input.autocomplete = "new-password";
-      input.placeholder = field.configured ? "Beállítva · üresen hagyva megmarad" : "Nincs beállítva";
+      input.placeholder = field.configured ? tr("Beállítva · üresen hagyva megmarad") : tr("Nincs beállítva");
     }
   }
   input.value = field.value;
@@ -340,7 +376,7 @@ function settingControl(section, field) {
   if (field.path_type && !field.overridden) {
     const button = document.createElement("button");
     button.type = "button";
-    button.textContent = "Tallózás…";
+    localize(button, "Tallózás…");
     button.addEventListener("click", () => {
       pathInput = {input, kind: field.path_type};
       pathState = null;
@@ -351,6 +387,15 @@ function settingControl(section, field) {
     });
     row.append(button);
   }
+  const explanation = settingHelp[section + "." + field.name];
+  if (explanation) {
+    const hint = document.createElement("small");
+    hint.className = "setting-help";
+    hint.id = input.id + "-help";
+    localize(hint, explanation);
+    input.setAttribute("aria-describedby", hint.id);
+    row.append(hint);
+  }
   return row;
 }
 
@@ -360,7 +405,7 @@ async function browsePath(path) {
     const result = await settingsRequest("/browse", {path, kind: target.kind});
     if (target !== pathInput || !pathDialog.open) return;
     pathState = result;
-    byId("path-current").textContent = result.path || "Kezdőkönyvtárak";
+    byId("path-current").textContent = result.path || tr("Kezdőkönyvtárak");
     byId("path-up").disabled = result.parent === null;
     byId("path-select").hidden = target.kind !== "directory" || !result.path;
     byId("path-entries").replaceChildren(...result.entries.map((entry) => {
@@ -400,12 +445,13 @@ byId("settings-connect").addEventListener("submit", (event) => {
       const panel = document.createElement("fieldset");
       panel.className = "panel";
       const title = document.createElement("legend");
-      title.textContent = section.title;
+      localize(title, section.title);
       panel.append(title, ...section.fields.map((field) => settingControl(section.name, field)));
       return panel;
     }));
     settingsForm.hidden = false;
-    settingsStatus.textContent = "A mentett beállításokat a szolgáltatások újraindításkor töltik be.";
+    void refreshServices();
+    settingsStatus.textContent = tr("A mentett beállításokat a szolgáltatások újraindításkor töltik be.");
   });
 });
 settingsForm.addEventListener("submit", (event) => {
@@ -417,6 +463,42 @@ settingsForm.addEventListener("submit", (event) => {
     }
     await settingsRequest("/save", {changes});
     settingsForm.querySelectorAll('input[type="password"]').forEach((input) => { input.value = ""; });
-    settingsStatus.textContent = "INI mentve. A futó szolgáltatások az új beállításokat újraindításkor töltik be.";
+    settingsStatus.textContent = tr("INI mentve. A futó szolgáltatások az új beállításokat újraindításkor töltik be.");
   });
 });
+
+async function refreshServices() {
+  const status = byId("service-status");
+  try {
+    const {states} = await settingsRequest("/services", {action: "status"});
+    const names = {api: "Memória-API", proxy: "Chatproxy", extractor: "Helyi kivonatoló", worker: "Feldolgozó"};
+    byId("service-list").replaceChildren(...Object.entries(states).map(([service, state]) => {
+      const row = document.createElement("p");
+      const name = document.createElement("strong");
+      localize(name, names[service]);
+      row.append(name, " · ", state, " ");
+      if (service !== "worker" && state !== "unavailable") {
+        const button = document.createElement("button");
+        button.type = "button";
+        localize(button, "Újraindítás");
+        button.addEventListener("click", async () => {
+          button.disabled = true;
+          try {
+            await settingsRequest("/services", {action: "restart", service});
+            status.textContent = tr("Újraindítás ütemezve. Várj néhány másodpercet, majd frissítsd az állapotot.");
+          } catch (error) {
+            status.textContent = error.message;
+          } finally {
+            button.disabled = false;
+          }
+        });
+        row.append(button);
+      }
+      return row;
+    }));
+  } catch (error) {
+    status.textContent = error.message;
+  }
+}
+
+byId("refresh-services").addEventListener("click", refreshServices);

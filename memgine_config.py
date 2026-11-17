@@ -4,6 +4,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 OPTIONS = {
+    "MEMGINE_TIMEZONE": ("api", "timezone"),
     "MEMGINE_LLAMA_SERVER": ("extractor", "llama_server"),
     "MEMGINE_EXTRACT_GGUF": ("extractor", "gguf"),
     "MEMGINE_EXTRACT_THREADS": ("extractor", "threads"),

@@ -164,6 +164,12 @@ class Proxy(BaseHTTPRequestHandler):
             user = webui_user(self.headers.get("X-OpenWebUI-User-Jwt"), self.server.webui_jwt_secret)
         scope = {"user_id": user, "model_id": model,
                  "conversation_id": conversation}
+        history = [
+            {"role": entry["role"], "content": entry["content"][:2000]}
+            for entry in messages[:-1]
+            if isinstance(entry, dict) and entry.get("role") in ("user", "assistant")
+            and isinstance(entry.get("content"), str)
+        ][-2:]
         try:
             response = self.memory_call("search", dict(scope, query=content))
             texts = [memory["text"] for memory in response["memories"]]
@@ -183,7 +189,7 @@ class Proxy(BaseHTTPRequestHandler):
         if recall:
             return body
         try:
-            self.memory_call("ingest", dict(scope, message_id=message_id, text=content))
+            self.memory_call("ingest", dict(scope, message_id=message_id, text=content, history=history))
         except (OSError, ValueError):
             self.log_error("Memgine ingest failed")
         return body

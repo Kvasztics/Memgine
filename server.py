@@ -18,7 +18,8 @@ from contextlib import closing
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from uuid import uuid4
 from pathlib import Path
-from datetime import datetime
+from datetime import date, datetime, time, timedelta
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from time import perf_counter
 
 LOG = logging.getLogger("memgine")
@@ -49,18 +50,38 @@ def required(body, field, maximum=256):
     return value
 
 
+def message_context(body):
+    history = body.get("history", [])
+    if not isinstance(history, list) or len(history) > 2:
+        raise ValueError("Invalid recent history")
+    for entry in history:
+        if (not isinstance(entry, dict) or entry.get("role") not in ("user", "assistant")
+                or not isinstance(entry.get("content"), str) or len(entry["content"]) > 2000):
+            raise ValueError("Invalid recent message")
+    timezone = body.get("timezone", setting("MEMGINE_TIMEZONE"))
+    if not isinstance(timezone, str) or not 1 <= len(timezone) <= 128:
+        raise ValueError("Invalid time zone")
+    try:
+        zone = ZoneInfo(timezone)
+    except (ZoneInfoNotFoundError, ValueError) as error:
+        raise ValueError("Invalid time zone") from error
+    return json.dumps({"received_at": datetime.now(zone).isoformat(),
+                       "timezone": timezone, "history": history}, ensure_ascii=False)
+
+
 def ingest(db, client, body):
     scope = (client, required(body, "user_id"), required(body, "model_id"),
              required(body, "conversation_id"), required(body, "message_id"))
     text = required(body, "text", 65536)
+    context = message_context(body)
     review_required = body.get("review_required")
     if "review_required" in body and type(review_required) is not bool:
         raise ValueError("Invalid review_required")
     with db:
         db.execute(
-            """INSERT INTO jobs (id, client, user_id, model_id, conversation_id, message_id, text, status, review_required) VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?)
+            """INSERT INTO jobs (id, client, user_id, model_id, conversation_id, message_id, text, status, review_required, message_context) VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?)
                ON CONFLICT(client,user_id,model_id,conversation_id,message_id) DO NOTHING""",
-            (uuid4().hex, *scope, text, review_required),
+            (uuid4().hex, *scope, text, review_required, context),
         )
         job = db.execute(
             """SELECT id, text, status FROM jobs
@@ -85,6 +106,7 @@ def search(db, client, body):
     rows = db.execute(
         """SELECT id, kind, text, conversation_id FROM memories
            WHERE client=? AND user_id=? AND model_id=? AND active=1
+             AND (expires_at IS NULL OR expires_at > unixepoch())
              AND (kind IN ('profile','context') OR (kind='project' AND conversation_id=?))
            ORDER BY id""",
         (client, user, model, conversation),
@@ -101,7 +123,8 @@ def search(db, client, body):
                 """SELECT v.memory_id, v.weights FROM splade_vectors v
                    JOIN memories m ON m.id=v.memory_id
                    WHERE v.version=? AND m.client=? AND m.user_id=? AND m.model_id=?
-                     AND m.active=1 AND (m.kind='context' OR
+                     AND m.active=1 AND (m.expires_at IS NULL OR m.expires_at > unixepoch())
+                     AND (m.kind='context' OR
                          (m.kind='project' AND m.conversation_id=?))""",
                 (config[0], client, user, model, conversation),
             ).fetchall()
@@ -129,6 +152,7 @@ def replacement(db, scope, proposal):
     return db.execute(
         """SELECT text FROM memories
            WHERE client=? AND user_id=? AND model_id=? AND active=1
+             AND (expires_at IS NULL OR expires_at > unixepoch())
              AND (kind IN ('profile','context') OR conversation_id=?)
              AND id=? AND kind=?""",
         (*scope, proposal["memory_id"], proposal["kind"]),
@@ -147,11 +171,11 @@ def list_memories(db, client, body):
         filters.append("instr(lower(text), lower(?)) > 0")
         params.append(required(body, "query", 500))
     if body.get("include_inactive") is not True:
-        filters.append("active=1")
+        filters.append("active=1 AND (expires_at IS NULL OR expires_at > unixepoch())")
     offset = body.get("offset", 0)
     if type(offset) is not int or not 0 <= offset <= 1000000:
         raise ValueError("Invalid offset")
-    fields = ["id", "user_id", "model_id", "conversation_id", "kind", "text", "active"]
+    fields = ["id", "user_id", "model_id", "conversation_id", "kind", "text", "active", "event_date", "expires_at"]
     rows = db.execute(
         f"SELECT {', '.join(fields)} FROM memories WHERE {' AND '.join(filters)} "
         "ORDER BY rowid DESC LIMIT 26 OFFSET ?", (*params, offset),
@@ -179,21 +203,27 @@ def edit_memory(db, client, body):
     with db:
         db.execute("BEGIN IMMEDIATE")
         row = db.execute(
-            """SELECT user_id, model_id, conversation_id, kind, text, active
+            """SELECT user_id, model_id, conversation_id, kind, text, active, event_date, expires_at
                FROM memories WHERE client=? AND id=?""", (client, memory_id),
         ).fetchone()
         if row is None:
             return 404, {"error": "Memory not found"}
-        user, model, conversation, kind, old_text, active = row
-        if not active:
+        user, model, conversation, kind, old_text, active, event_date, expires_at = row
+        if not active or (expires_at is not None and expires_at <= datetime.now().timestamp()):
             return 409, {"error": "Memory has already been replaced"}
-        if text == old_text:
+        new_kind = body.get("kind", kind)
+        if new_kind not in ("project", "profile", "context"):
+            raise ValueError("Invalid memory kind")
+        if new_kind == "project" and not conversation:
+            raise ValueError("Project memory requires a conversation")
+        if text == old_text and new_kind == kind:
             return 200, {"id": memory_id}
         new_id = uuid4().hex
         db.execute("UPDATE memories SET active=0 WHERE client=? AND id=?", (client, memory_id))
         db.execute(
-            "INSERT INTO memories VALUES (?, ?, ?, ?, ?, ?, ?, 1)",
-            (new_id, client, user, model, conversation, kind, text),
+            """INSERT INTO memories (id,client,user_id,model_id,conversation_id,kind,text,active,event_date,expires_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?)""",
+            (new_id, client, user, model, conversation, new_kind, text, event_date, expires_at),
         )
     LOG.info("memory_edited previous_id=%s id=%s", memory_id, new_id)
     return 200, {"id": new_id}
@@ -234,8 +264,9 @@ def save_proposal(db, job_id, scope, proposal, action, kind, text):
             return False
         db.execute("UPDATE memories SET active=0 WHERE id=?", (proposal["memory_id"],))
     db.execute(
-        "INSERT INTO memories VALUES (?, ?, ?, ?, ?, ?, ?, 1)",
-        (job_id, *scope, kind, text),
+        """INSERT INTO memories (id,client,user_id,model_id,conversation_id,kind,text,active,event_date,expires_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?)""",
+        (job_id, *scope, kind, text, proposal.get("event_date"), proposal.get("expires_at")),
     )
     return True
 
@@ -287,16 +318,32 @@ def initialize(database):
             db.execute("ALTER TABLE jobs ADD COLUMN proposal TEXT")
         if "review_required" not in columns:
             db.execute("ALTER TABLE jobs ADD COLUMN review_required INTEGER")
+        if "message_context" not in columns:
+            db.execute("ALTER TABLE jobs ADD COLUMN message_context TEXT")
+        memory_columns = {row[1] for row in db.execute("PRAGMA table_info(memories)")}
+        if "event_date" not in memory_columns:
+            db.execute("ALTER TABLE memories ADD COLUMN event_date TEXT")
+        if "expires_at" not in memory_columns:
+            db.execute("ALTER TABLE memories ADD COLUMN expires_at INTEGER")
 
 
-def extract(text, candidates=()):
+def extract(text, candidates=(), context=None):
+    context = context or {}
+    local_date = None
+    if context:
+        zone = ZoneInfo(context["timezone"])
+        local_date = datetime.fromisoformat(context["received_at"]).astimezone(zone).date()
+    message = {"message": text, "memories": candidates, "history": context.get("history", [])}
+    if local_date:
+        message.update({"local_date": local_date.isoformat(), "timezone": context["timezone"],
+                        "tomorrow": (local_date + timedelta(days=1)).isoformat()})
     payload = {
         "model": setting("MEMGINE_EXTRACT_MODEL"),
         "temperature": float(setting("MEMGINE_EXTRACT_TEMPERATURE")),
         "max_tokens": int(setting("MEMGINE_EXTRACT_MAX_TOKENS")),
         "chat_template_kwargs": {"enable_thinking": False},
         "messages": [{"role": "system", "content": SYSTEM_PROMPT},
-                     {"role": "user", "content": json.dumps({"message": text, "memories": candidates}, ensure_ascii=False)}],
+                     {"role": "user", "content": json.dumps(message, ensure_ascii=False)}],
     }
     request = Request(
         setting("MEMGINE_EXTRACT_URL"),
@@ -315,6 +362,16 @@ def extract(text, candidates=()):
     if action not in ("add", "supersede") or kind not in ("profile", "project", "context"):
         raise ValueError("Invalid extraction action or kind")
     result = {"action": action, "kind": kind, "text": required(proposal, "text", 500).strip()}
+    if proposal.get("event_date") is not None:
+        try:
+            value = proposal["event_date"]
+            event = date.fromisoformat(value)
+            if not local_date or event.isoformat() != value or event < local_date:
+                raise ValueError
+            expiry = datetime.combine(event + timedelta(days=1), time.min, tzinfo=zone)
+        except (TypeError, ValueError, OverflowError):
+            return "skipped", {"action": "skip", "reason": "invalid event date"}
+        result.update(event_date=value, expires_at=int(expiry.timestamp()))
     if action == "supersede":
         target = proposal.get("memory_id")
         if not any(item["id"] == target and item["kind"] == kind for item in candidates):
@@ -335,14 +392,14 @@ def work(database):
                 splade.index(db)
             except (OSError, subprocess.SubprocessError) as error:
                 print(f"Memgine SPLADE indexing unavailable: {type(error).__name__}", file=sys.stderr)
-        jobs = db.execute("SELECT id, text, client, user_id, model_id, conversation_id, review_required FROM jobs WHERE status='queued' ORDER BY rowid LIMIT 3").fetchall()
-        for job_id, text, client, user, model, conversation, review_required in jobs:
+        jobs = db.execute("SELECT id, text, client, user_id, model_id, conversation_id, review_required, message_context FROM jobs WHERE status='queued' ORDER BY rowid LIMIT 3").fetchall()
+        for job_id, text, client, user, model, conversation, review_required, context in jobs:
             _, result = search(db, client, {
                 "user_id": user, "model_id": model, "conversation_id": conversation,
                 "query": text[:8192].strip(), "limit": 8,
             })
             try:
-                status, proposal = extract(text, result["memories"])
+                status, proposal = extract(text, result["memories"], json.loads(context) if context else None)
             except (OSError, ValueError, KeyError, IndexError, TypeError) as error:
                 LOG.error("extraction_failed id=%s error=%s", job_id, type(error).__name__)
                 raise
@@ -406,6 +463,43 @@ def save_ui_settings(db, client, body):
     return 200, {"saved": True}
 
 
+SERVICE_UNITS = {
+    "api": "memgine-api.service",
+    "proxy": "memgine-proxy.service",
+    "extractor": "memgine-extractor.service",
+    "worker": "memgine-worker.timer",
+}
+
+
+def service_control(db, client, body):
+    action = body.get("action")
+    if action == "status":
+        states = {}
+        for name, unit in SERVICE_UNITS.items():
+            result = subprocess.run(
+                ["systemctl", "--user", "show", "--property=LoadState,ActiveState",
+                 "--", unit], capture_output=True, text=True, timeout=3,
+            )
+            props = dict(line.split("=", 1) for line in result.stdout.splitlines() if "=" in line)
+            states[name] = props.get("ActiveState", "unknown") if props.get("LoadState") == "loaded" else "unavailable"
+        return 200, {"states": states}
+    name = body.get("service")
+    if action != "restart" or name not in ("api", "proxy", "extractor"):
+        raise ValueError("Invalid service action")
+    if name == "api" and int(ui_settings.read_config().get("api", "port")) != int(setting("MEMGINE_PORT")):
+        return 409, {"error": "API port changed. Restart from the terminal and open the new address."}
+    command = ["systemctl", "--user", "--no-block", "restart", "--", SERVICE_UNITS[name]]
+    if name == "api":
+        command = ["systemd-run", "--user", "--on-active=2s", "--", *command]
+    result = subprocess.run(
+        command,
+        capture_output=True, timeout=3,
+    )
+    if result.returncode:
+        return 503, {"error": "Could not queue service restart"}
+    return 202, {"queued": True}
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_request(self, code="-", size="-"):
         LOG.debug("http status=%s", code)
@@ -423,6 +517,7 @@ class Handler(BaseHTTPRequestHandler):
         asset = {
             "/": ("index.html", "text/html"),
             "/ui/style.css": ("style.css", "text/css"),
+            "/ui/locale.js": ("locale.js", "text/javascript"),
             "/ui/app.js": ("app.js", "text/javascript"),
             "/ui/memgine.png": ("memgine.png", "image/png"),
         }.get(self.path)
@@ -462,6 +557,7 @@ class Handler(BaseHTTPRequestHandler):
             "/v1/admin/logs": read_logs,
             "/v1/admin/settings": lambda db, client, body: (200, {"sections": ui_settings.fields()}),
             "/v1/admin/settings/save": save_ui_settings,
+            "/v1/admin/settings/services": service_control,
             "/v1/admin/settings/browse": lambda db, client, body: (
                 200, ui_settings.browse(body.get("path", ""), body.get("kind"))
             ),
@@ -490,7 +586,7 @@ class Handler(BaseHTTPRequestHandler):
         except ValueError as error:
             self.respond(400, {"error": str(error)})
             return
-        except (sqlite3.Error, OSError) as error:
+        except (sqlite3.Error, OSError, subprocess.SubprocessError) as error:
             LOG.error("storage_unavailable error=%s", type(error).__name__)
             self.respond(503, {"error": "Storage unavailable"})
             return

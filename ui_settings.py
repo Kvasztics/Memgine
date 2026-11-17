@@ -6,6 +6,7 @@ import os
 import tempfile
 from pathlib import Path
 from urllib.parse import urlsplit
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from memgine_config import OPTIONS, ROOT, setting
 
@@ -59,6 +60,11 @@ def validate(section, name, value):
     if not isinstance(value, str) or len(value) > 4096 or any(c in value for c in "\r\n\0"):
         raise ValueError(f"Invalid setting: {section}.{name}")
     value = value.strip()
+    if name == "timezone":
+        try:
+            ZoneInfo(value)
+        except (ZoneInfoNotFoundError, ValueError) as error:
+            raise ValueError("Invalid IANA time zone") from error
     if name in CHOICES and value not in CHOICES[name]:
         raise ValueError(f"Invalid choice: {section}.{name}")
     number = NUMBERS.get(name)

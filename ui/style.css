@@ -78,3 +78,18 @@ nav button[aria-pressed="true"] { color: var(--mint); border-color: var(--mint);
   .setting-row label { grid-column: 1 / -1; }
   .setting-row > :is(input, select):last-child { grid-column: 1 / -1; }
 }
+
+.setting-help {
+  grid-column: 2 / -1;
+  color: var(--muted);
+  line-height: 1.45;
+}
+.setting-row > :is(input, select):nth-last-child(2):not(:has(+ button)) {
+  grid-column: 2 / -1;
+}
+@media (max-width: 640px) {
+  .setting-help,
+  .setting-row > :is(input, select):nth-last-child(2):not(:has(+ button)) {
+    grid-column: 1 / -1;
+  }
+}
