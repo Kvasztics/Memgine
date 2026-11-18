@@ -19,6 +19,7 @@ async function post(route, body, base = "/v1/memory/") {
 }
 
 async function loadReview() {
+  const previousJob = current?.job_id;
   review.hidden = true;
   current = null;
   const selected = scopes[Number(scope.value)];
@@ -31,8 +32,10 @@ async function loadReview() {
   byId("status").textContent = total ? total + tr(" jóváhagyásra vár ebben a hatókörben.") : tr("Ez a várólista üres.");
   if (!next) return;
   current = {user_id, model_id, job_id: next.job_id};
+  if (next.job_id !== previousJob) byId("review-reason").value = "";
   byId("source").textContent = next.source;
   byId("text").value = next.proposal.text;
+  showConfidence(byId("review-confidence"), next.proposal.confidence);
   const eventDate = next.proposal.event_date;
   byId("review-event").hidden = !eventDate;
   byId("review-event-date").textContent = eventDate ?? "";
@@ -76,6 +79,8 @@ byId("connect").addEventListener("submit", (event) => {
   event.preventDefault();
   run(async () => {
     key = byId("key").value.trim();
+    byId("dream-result").replaceChildren();
+    byId("dream-status").textContent = "";
     byId("log-output").textContent = "";
     byId("log-output").hidden = true;
     byId("log-status").textContent = "";
@@ -102,9 +107,13 @@ review.addEventListener("submit", (event) => {
   if (!current || !event.submitter) return;
   const decision = event.submitter.value;
   const payload = {...current, decision};
+  const reason = byId("review-reason").value.trim();
   if (decision === "approve") {
+    payload.approval_reason = reason;
     Object.assign(payload, {text: byId("text").value.trim(),
       kind: byId("kind").value, mode: byId("mode").value});
+  } else {
+    payload.rejection_reason = reason;
   }
   run(async () => {
     await post("review", payload);
@@ -140,6 +149,9 @@ function memoryCard(item) {
   meta.append(kind, " · ", state, " · ",
     [item.user_id, item.model_id, item.conversation_id].filter(Boolean).join(" · "));
   card.append(meta);
+  const confidence = document.createElement("span");
+  showConfidence(confidence, item.confidence);
+  meta.append(" · ", confidence);
   if (item.event_date) {
     const label = document.createElement("span");
     const date = document.createElement("time");
@@ -198,7 +210,22 @@ function memoryCard(item) {
     kindSelect.append(option);
   }
   kindSelect.value = draft?.kind ?? item.kind;
-  const saveDraft = () => drafts.set(item.id, {text: text.value, kind: kindSelect.value});
+  const confidenceInput = document.createElement("input");
+  confidenceInput.id = "memory-confidence-" + item.id;
+  confidenceInput.type = "number";
+  confidenceInput.min = "0";
+  confidenceInput.max = "100";
+  confidenceInput.step = "any";
+  confidenceInput.placeholder = tr("Nincs értékelve");
+  const initialConfidence = item.confidence == null ? "" : String(item.confidence * 100);
+  confidenceInput.value = draft?.confidence ?? initialConfidence;
+  const confidenceLabel = document.createElement("label");
+  confidenceLabel.htmlFor = confidenceInput.id;
+  localize(confidenceLabel, "Alátámasztottság (%)");
+  const saveDraft = () => drafts.set(item.id, {
+    text: text.value, kind: kindSelect.value, confidence: confidenceInput.value,
+  });
+  confidenceInput.addEventListener("input", saveDraft);
   text.addEventListener("input", saveDraft);
   kindSelect.addEventListener("change", saveDraft);
   const save = document.createElement("button");
@@ -206,12 +233,16 @@ function memoryCard(item) {
   localize(save, "Módosítás mentése");
   const actions = document.createElement("div");
   actions.className = "actions";
-  actions.append(kindLabel, kindSelect, save, remove);
+  actions.append(kindLabel, kindSelect, confidenceLabel, confidenceInput, save, remove);
   form.append(text, actions);
   form.addEventListener("submit", (event) => {
     event.preventDefault();
     run(async () => {
-      await post("edit", {id: item.id, text: text.value.trim(), kind: kindSelect.value});
+      const payload = {id: item.id, text: text.value.trim(), kind: kindSelect.value};
+      if (confidenceInput.value !== initialConfidence) {
+        payload.confidence = confidenceInput.value === "" ? null : confidenceInput.valueAsNumber / 100;
+      }
+      await post("edit", payload);
       drafts.delete(item.id);
       await loadMemories();
       memoryStatus(tr("Emlék mentve. ") + byId("memory-status").textContent);
@@ -249,7 +280,7 @@ byId("memory-back").addEventListener("click", () => run(() => loadMemories(memor
 byId("memory-next").addEventListener("click", () => run(() => loadMemories(memoryOffset + 25)));
 
 function showTab(name) {
-  for (const tab of ["memories", "reviews", "logs", "settings"]) {
+  for (const tab of ["memories", "reviews", "dreaming", "logs", "settings"]) {
     const visible = tab === name;
     byId(tab).hidden = !visible;
     byId("show-" + tab).setAttribute("aria-pressed", String(visible));
@@ -263,6 +294,116 @@ function showTab(name) {
 }
 byId("show-memories").addEventListener("click", () => showTab("memories"));
 byId("show-reviews").addEventListener("click", () => showTab("reviews"));
+
+byId("show-dreaming").addEventListener("click", () => showTab("dreaming"));
+byId("dream-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const status = byId("dream-status");
+  const result = byId("dream-result");
+  const button = event.submitter;
+  if (!key) {
+    localize(status, "Előbb csatlakozz a Memgine API-kulccsal.");
+    return;
+  }
+  result.replaceChildren();
+  const requestKey = key;
+  const scope = Object.fromEntries(new FormData(event.currentTarget));
+  button.disabled = true;
+  localize(status, "Dreaming folyamatban…");
+  try {
+    const {job} = await post("dream", scope);
+    if (key !== requestKey) return;
+    if (!job) {
+      localize(status, "Nincs alátámasztott új javaslat.");
+      return;
+    }
+    if (job.status !== "review" && job.status !== "dismissed") {
+      localize(status, "Erről a javaslatról már döntöttél.");
+      return;
+    }
+    const card = document.createElement("article");
+    card.className = "panel";
+    const text = document.createElement("p");
+    text.textContent = job.proposal.text;
+    const confidence = document.createElement("p");
+    showConfidence(confidence, job.proposal.confidence);
+    const sources = document.createElement("fieldset");
+    const sourceTitle = document.createElement("legend");
+    localize(sourceTitle, "Archiválandó forrásemlékek");
+    const hint = document.createElement("p");
+    localize(hint, "Csak azt jelöld be, amelynek minden fontos részletét megtartja az összegzés.");
+    sources.append(sourceTitle, hint);
+    for (const source of job.sources) {
+      const row = document.createElement("p");
+      const label = document.createElement("label");
+      const checkbox = document.createElement("input");
+      checkbox.type = "checkbox";
+      checkbox.value = source.id;
+      label.append(checkbox, " " + source.text);
+      row.append(label);
+      sources.append(row);
+    }
+    const actions = document.createElement("div");
+    actions.className = "actions";
+    for (const [decision, label] of [["approve", "Jóváhagyás"], ["dismiss", "Elvetés"]]) {
+      const control = document.createElement("button");
+      localize(control, label);
+      control.addEventListener("click", async () => {
+        for (const action of actions.children) action.disabled = true;
+        try {
+          const payload = {...scope, job_id: job.job_id, decision};
+          if (decision === "approve") {
+            payload.archive_source_ids = Array.from(sources.querySelectorAll("input:checked"), (input) => input.value);
+          }
+          await post("review", payload);
+          reviewsLoaded = false;
+          card.remove();
+          localize(status, decision === "approve" ? "Dreaming-emlék mentve." : "Dreaming-javaslat elvetve.");
+        } catch (error) {
+          delete status.dataset.locale;
+          status.textContent = error.message;
+        } finally {
+          for (const action of actions.children) action.disabled = false;
+        }
+      });
+      actions.append(control);
+    }
+    card.append(text, confidence, sources, actions);
+    if (job.status === "dismissed") {
+      sources.hidden = true;
+      actions.hidden = true;
+      const reopen = document.createElement("button");
+      localize(reopen, "Javaslat újranyitása");
+      reopen.addEventListener("click", async () => {
+        reopen.disabled = true;
+        try {
+          await post("review", {...scope, job_id: job.job_id, decision: "reopen"});
+          reopen.remove();
+          sources.hidden = false;
+          actions.hidden = false;
+          reviewsLoaded = false;
+          localize(status, "A javaslat jóváhagyásra vár.");
+        } catch (error) {
+          delete status.dataset.locale;
+          status.textContent = error.message;
+          reopen.disabled = false;
+        }
+      });
+      card.append(reopen);
+    }
+
+    result.append(card);
+    reviewsLoaded = false;
+    localize(status, job.status === "dismissed" ? "Erről a javaslatról már döntöttél." : "A javaslat jóváhagyásra vár.");
+  } catch (error) {
+    if (key === requestKey) {
+      delete status.dataset.locale;
+      status.textContent = error.message;
+    }
+  } finally {
+    button.disabled = false;
+  }
+});
 
 byId("refresh-reviews").addEventListener("click", () => run(async () => {
   const draft = current && {
@@ -439,7 +580,8 @@ byId("settings-connect").addEventListener("submit", (event) => {
   void settingsAction(async () => {
     settingsForm.hidden = true;
     settingsKey = byId("settings-key").value;
-    const {sections} = await settingsRequest("");
+    const {sections, prompts} = await settingsRequest("");
+    renderPrompts(prompts);
     byId("settings-key").value = "";
     byId("settings-fields").replaceChildren(...sections.map((section) => {
       const panel = document.createElement("fieldset");
@@ -456,15 +598,26 @@ byId("settings-connect").addEventListener("submit", (event) => {
 });
 settingsForm.addEventListener("submit", (event) => {
   event.preventDefault();
-  void settingsAction(async () => {
-    const changes = {};
-    for (const input of settingsForm.querySelectorAll("[data-section]:enabled")) {
-      (changes[input.dataset.section] ??= {})[input.name] = input.value;
+  const status = byId("settings-save-status");
+  const button = event.submitter;
+  if (button) button.disabled = true;
+  localize(status, "Mentés folyamatban…");
+  void (async () => {
+    try {
+      const changes = {};
+      for (const input of settingsForm.querySelectorAll("[data-section]:enabled")) {
+        (changes[input.dataset.section] ??= {})[input.name] = input.value;
+      }
+      await settingsRequest("/save", {changes});
+      settingsForm.querySelectorAll('input[type="password"]').forEach((input) => { input.value = ""; });
+      localize(status, "INI mentve. A futó szolgáltatások az új beállításokat újraindításkor töltik be.");
+    } catch (error) {
+      delete status.dataset.locale;
+      status.textContent = error.message;
+    } finally {
+      if (button) button.disabled = false;
     }
-    await settingsRequest("/save", {changes});
-    settingsForm.querySelectorAll('input[type="password"]').forEach((input) => { input.value = ""; });
-    settingsStatus.textContent = tr("INI mentve. A futó szolgáltatások az új beállításokat újraindításkor töltik be.");
-  });
+  })();
 });
 
 async function refreshServices() {
@@ -502,3 +655,49 @@ async function refreshServices() {
 }
 
 byId("refresh-services").addEventListener("click", refreshServices);
+
+
+function showConfidence(element, score) {
+  const label = document.createElement("span");
+  localize(label, "Alátámasztottság");
+  const value = document.createElement("span");
+  if (typeof score === "number") value.textContent = Math.round(score * 100) + "%";
+  else localize(value, "Nincs értékelve");
+  element.replaceChildren(label, " · ", value);
+}
+
+function renderPrompts(prompts) {
+  const names = {
+    extraction: "Kivonatolás", recall: "Visszakérdezés", context: "Emlékkontextus",
+    dreaming: "Dreaming", critic: "Kritikus",
+  };
+  const panel = document.createElement("fieldset");
+  panel.className = "panel";
+  const legend = document.createElement("legend");
+  localize(legend, "Promptok");
+  panel.append(legend);
+  for (const prompt of prompts) {
+    const group = document.createElement("div");
+    const label = document.createElement("label");
+    const input = document.createElement("textarea");
+    input.id = "prompt-" + prompt.name;
+    input.name = prompt.name;
+    input.dataset.section = "prompts";
+    input.value = prompt.value;
+    input.rows = 5;
+    input.maxLength = 16000;
+    input.required = true;
+    label.htmlFor = input.id;
+    localize(label, names[prompt.name]);
+    const reset = document.createElement("button");
+    reset.type = "button";
+    localize(reset, "Alapértelmezett visszaállítása");
+    reset.addEventListener("click", () => { input.value = prompt.default; });
+    group.append(label, input, reset);
+    panel.append(group);
+  }
+  const hint = document.createElement("p");
+  localize(hint, "A kivonatoló a következő futáskor, a chatproxy újraindításkor tölti be a mentett promptokat. A Dreaming és a Kritikus promptja előkészíthető.");
+  panel.append(hint);
+  byId("prompt-fields").replaceChildren(panel);
+}

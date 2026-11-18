@@ -15,6 +15,7 @@
     <nav aria-label="Memgine views" data-locale-aria="Memgine nézetek">
       <button id="show-memories" type="button" aria-pressed="true"><span data-locale="Emlékek">Memories</span></button>
       <button id="show-reviews" type="button" aria-pressed="false"><span data-locale="Jóváhagyások">Approvals</span></button>
+      <button id="show-dreaming" type="button" aria-pressed="false"><span data-locale="Dreaming">Dreaming</span></button>
       <button id="show-logs" type="button" aria-pressed="false"><span data-locale="Naplók">Logs</span></button>
       <button id="show-settings" type="button" aria-pressed="false"><span data-locale="Beállítások">Settings</span></button>
       <select id="language" aria-label="Language">
@@ -73,6 +74,9 @@
           <h3><span data-locale="Korábbi emlék">Previous memory</span></h3>
           <p id="previous"></p>
         </article>
+        <label for="review-reason" data-locale="Döntés indoklása (opcionális)">Reason for your decision (optional)</label>
+        <textarea id="review-reason" rows="2" maxlength="1000"></textarea>
+        <p id="review-confidence"></p>
         <p id="review-event" hidden><strong data-locale="Esemény dátuma">Event date</strong> <time id="review-event-date"></time></p>
         <div class="actions">
           <label for="kind"><span data-locale="Emléktípus">Memory type</span></label>
@@ -114,6 +118,16 @@
     <p id="log-status" role="status"></p>
     <pre id="log-output" class="panel" hidden></pre>
   </section>
+  <section id="dreaming" hidden aria-labelledby="dream-title">
+    <h2 id="dream-title" data-locale="Dreaming">Dreaming</h2>
+    <form id="dream-form" class="panel connection">
+      <label><span data-locale="Felhasználó">User</span> <input name="user_id" maxlength="256" required></label>
+      <label><span data-locale="Modell">Model</span> <input name="model_id" maxlength="256" required></label>
+      <button type="submit" class="primary" data-locale="Dreaming indítása">Run Dreaming</button>
+    </form>
+    <p id="dream-status" role="status"></p>
+    <div id="dream-result"></div>
+  </section>
   <section id="settings" hidden>
     <h2><span data-locale="Beállítások">Settings</span></h2>
     <form id="settings-connect" class="panel connection">
@@ -130,7 +144,9 @@
         <div id="service-list"></div>
       </fieldset>
       <div id="settings-fields"></div>
+      <div id="prompt-fields"></div>
       <button class="primary" type="submit"><span data-locale="Beállítások mentése">Save settings</span></button>
+      <p id="settings-save-status" role="status"></p>
     </form>
     <dialog id="path-browser" aria-labelledby="path-title">
       <h3 id="path-title"><span data-locale="Tallózás a Memgine szerveren">Browse the Memgine server</span></h3>

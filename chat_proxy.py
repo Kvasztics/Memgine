@@ -6,7 +6,7 @@ import json
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from memgine_config import setting
-from prompts import MEMORY_CONTEXT_PROMPT, MEMORY_RECALL_PROMPT
+from prompts import active_prompt
 from urllib.parse import urlsplit
 from urllib.request import ProxyHandler, Request, build_opener
 
@@ -175,8 +175,8 @@ class Proxy(BaseHTTPRequestHandler):
             texts = [memory["text"] for memory in response["memories"]]
             if texts or recall:
                 instruction = (
-                    MEMORY_RECALL_PROMPT + "\n" + MEMORY_CONTEXT_PROMPT
-                    if recall else MEMORY_CONTEXT_PROMPT
+                    active_prompt("recall") + "\n" + active_prompt("context")
+                    if recall else active_prompt("context")
                 )
                 messages.insert(0, {"role": "system", "content":
                     instruction + " "

@@ -1,3 +1,4 @@
+import json
 """Local operator configuration and server-side path browsing."""
 import configparser
 import fcntl
@@ -9,6 +10,7 @@ from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from memgine_config import OPTIONS, ROOT, setting
+from prompts import PROMPT_DEFAULTS
 
 SECRETS = {"key", "upstream_key", "webui_jwt_secret"}
 CHOICES = {
@@ -101,6 +103,16 @@ def save(changes):
             if not isinstance(values, dict):
                 raise ValueError("Invalid settings section")
             for name, raw in values.items():
+                if section == "prompts" and name in PROMPT_DEFAULTS:
+                    if not isinstance(raw, str) or len(raw) > 16000 or not raw.strip():
+                        raise ValueError(f"Invalid prompt: {name}")
+                    if not current.has_section(section):
+                        current.add_section(section)
+                    if raw == PROMPT_DEFAULTS[name]:
+                        current.remove_option(section, name)
+                    else:
+                        current.set(section, name, json.dumps(raw, ensure_ascii=False))
+                    continue
                 env = allowed.get((section, name))
                 if not env or env in os.environ:
                     raise ValueError(f"Setting cannot be changed: {section}.{name}")

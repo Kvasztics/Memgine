@@ -1,9 +1,10 @@
 from memgine_config import setting
-from prompts import SYSTEM_PROMPT
+from prompts import active_prompt, prompt_fields
 
 import hashlib
 import json
 import logging
+import math
 import re
 import sqlite3
 import sys
@@ -175,7 +176,7 @@ def list_memories(db, client, body):
     offset = body.get("offset", 0)
     if type(offset) is not int or not 0 <= offset <= 1000000:
         raise ValueError("Invalid offset")
-    fields = ["id", "user_id", "model_id", "conversation_id", "kind", "text", "active", "event_date", "expires_at"]
+    fields = ["id", "user_id", "model_id", "conversation_id", "kind", "text", "active", "event_date", "expires_at", "confidence"]
     rows = db.execute(
         f"SELECT {', '.join(fields)} FROM memories WHERE {' AND '.join(filters)} "
         "ORDER BY rowid DESC LIMIT 26 OFFSET ?", (*params, offset),
@@ -203,12 +204,12 @@ def edit_memory(db, client, body):
     with db:
         db.execute("BEGIN IMMEDIATE")
         row = db.execute(
-            """SELECT user_id, model_id, conversation_id, kind, text, active, event_date, expires_at
+            """SELECT user_id, model_id, conversation_id, kind, text, active, event_date, expires_at, confidence
                FROM memories WHERE client=? AND id=?""", (client, memory_id),
         ).fetchone()
         if row is None:
             return 404, {"error": "Memory not found"}
-        user, model, conversation, kind, old_text, active, event_date, expires_at = row
+        user, model, conversation, kind, old_text, active, event_date, expires_at, confidence = row
         if not active or (expires_at is not None and expires_at <= datetime.now().timestamp()):
             return 409, {"error": "Memory has already been replaced"}
         new_kind = body.get("kind", kind)
@@ -216,14 +217,19 @@ def edit_memory(db, client, body):
             raise ValueError("Invalid memory kind")
         if new_kind == "project" and not conversation:
             raise ValueError("Project memory requires a conversation")
-        if text == old_text and new_kind == kind:
+        new_confidence = body.get("confidence", confidence)
+        if new_confidence is not None and (
+            type(new_confidence) not in (int, float) or not 0 <= new_confidence <= 1
+        ):
+            raise ValueError("Confidence must be a number between 0 and 1 or null")
+        if text == old_text and new_kind == kind and new_confidence == confidence:
             return 200, {"id": memory_id}
         new_id = uuid4().hex
         db.execute("UPDATE memories SET active=0 WHERE client=? AND id=?", (client, memory_id))
         db.execute(
-            """INSERT INTO memories (id,client,user_id,model_id,conversation_id,kind,text,active,event_date,expires_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?)""",
-            (new_id, client, user, model, conversation, new_kind, text, event_date, expires_at),
+            """INSERT INTO memories (id,client,user_id,model_id,conversation_id,kind,text,active,event_date,expires_at,confidence)
+               VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)""",
+            (new_id, client, user, model, conversation, new_kind, text, event_date, expires_at, new_confidence),
         )
     LOG.info("memory_edited previous_id=%s id=%s", memory_id, new_id)
     return 200, {"id": new_id}
@@ -264,9 +270,10 @@ def save_proposal(db, job_id, scope, proposal, action, kind, text):
             return False
         db.execute("UPDATE memories SET active=0 WHERE id=?", (proposal["memory_id"],))
     db.execute(
-        """INSERT INTO memories (id,client,user_id,model_id,conversation_id,kind,text,active,event_date,expires_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?)""",
-        (job_id, *scope, kind, text, proposal.get("event_date"), proposal.get("expires_at")),
+        """INSERT INTO memories (id,client,user_id,model_id,conversation_id,kind,text,active,event_date,expires_at,confidence)
+               VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)""",
+        (job_id, *scope, kind, text, proposal.get("event_date"), proposal.get("expires_at"),
+         proposal.get("confidence")),
     )
     return True
 
@@ -274,37 +281,79 @@ def save_proposal(db, job_id, scope, proposal, action, kind, text):
 def review(db, client, body):
     job_id = required(body, "job_id")
     decision = body.get("decision", "inspect")
-    if decision not in ("inspect", "approve", "dismiss"):
+    if decision not in ("inspect", "approve", "dismiss", "reopen"):
         raise ValueError("Invalid decision")
     with db:
         db.execute("BEGIN IMMEDIATE")
         job = db.execute(
-            """SELECT status, proposal, user_id, model_id, conversation_id
+            """SELECT status, proposal, user_id, model_id, conversation_id, rejection_reason, approval_reason
                FROM jobs WHERE id=? AND client=?""", (job_id, client)
         ).fetchone()
         if job is None:
             return 404, {"error": "Job not found"}
-        status, raw, user, model, conversation = job
+        status, raw, user, model, conversation, rejection_reason, approval_reason = job
         proposal = json.loads(raw) if raw else None
         for field, value in (("user_id", user), ("model_id", model)):
             if field in body and required(body, field) != value:
                 return 404, {"error": "Job not found"}
         if decision == "inspect":
-            return 200, {"job_id": job_id, "status": status, "proposal": proposal}
+            result = {"job_id": job_id, "status": status, "proposal": proposal}
+            if rejection_reason is not None:
+                result["rejection_reason"] = rejection_reason
+            if approval_reason is not None:
+                result["approval_reason"] = approval_reason
+            return 200, result
+        if decision == "reopen":
+            source_ids = proposal.get("source_ids", []) if proposal else []
+            if status != "dismissed" or not source_ids:
+                return 409, {"error": "Only dismissed Dreaming proposals can be reopened"}
+            if not set(source_ids).issubset(dict(dreaming_sources(db, (client, user, model), source_ids))):
+                return 409, {"error": "Dreaming source unavailable"}
+            db.execute("UPDATE jobs SET status='review' WHERE id=?", (job_id,))
+            return 200, {"job_id": job_id, "status": "review"}
         if status != "review":
             return 409, {"error": "Job is not awaiting review"}
+        archive_ids = body.get("archive_source_ids", [])
+        if not isinstance(archive_ids, list) or any(not isinstance(value, str) for value in archive_ids):
+            raise ValueError("Invalid source selection")
+        if archive_ids and (decision != "approve" or not set(archive_ids).issubset(proposal.get("source_ids", []))):
+            raise ValueError("Only sources of this Dreaming proposal can be archived on approval")
         if decision == "approve":
+            source_ids = proposal.get("source_ids", [])
+            if source_ids and not set(source_ids).issubset(
+                dict(dreaming_sources(db, (client, user, model), source_ids))
+            ):
+                return 409, {"error": "Dreaming source unavailable"}
             text = required(body, "text", 500).strip() if "text" in body else proposal["text"]
             kind = body.get("kind", proposal["kind"])
             if kind not in ("profile", "project", "context"):
                 raise ValueError("Invalid memory kind")
+            if kind == "project" and not conversation:
+                raise ValueError("Project memory requires a conversation")
             action = body.get("mode", proposal["action"])
             if action not in ("add", "supersede"):
                 raise ValueError("Invalid approval mode")
             if not save_proposal(db, job_id, (client, user, model, conversation), proposal, action, kind, text):
                 return 409, {"error": "Replacement target unavailable or kind changed"}
+            if archive_ids:
+                db.executemany(
+                    "UPDATE memories SET active=0 WHERE client=? AND user_id=? AND model_id=? AND id=?",
+                    [(client, user, model, source_id) for source_id in set(archive_ids)],
+                )
+                db.execute("UPDATE jobs SET proposal=? WHERE id=?", (
+                    json.dumps({**proposal, "archived_source_ids": sorted(set(archive_ids))}, ensure_ascii=False),
+                    job_id,
+                ))
         status = "approved" if decision == "approve" else "dismissed"
-        db.execute("UPDATE jobs SET status=? WHERE id=?", (status, job_id))
+        reason_key = "approval_reason" if decision == "approve" else "rejection_reason"
+        reason = body.get(reason_key, "")
+        if not isinstance(reason, str) or len(reason) > 1000:
+            raise ValueError("Review reason must be a string of at most 1000 characters")
+        reason = reason.strip() or None
+        db.execute(
+            "UPDATE jobs SET status=?, rejection_reason=?, approval_reason=? WHERE id=?",
+            (status, reason if decision == "dismiss" else None, reason if decision == "approve" else None, job_id),
+        )
     LOG.info("review id=%s decision=%s status=%s", job_id, decision, status)
     return 200, {"job_id": job_id, "status": status}
 
@@ -320,11 +369,136 @@ def initialize(database):
             db.execute("ALTER TABLE jobs ADD COLUMN review_required INTEGER")
         if "message_context" not in columns:
             db.execute("ALTER TABLE jobs ADD COLUMN message_context TEXT")
+        if "rejection_reason" not in columns:
+            db.execute("ALTER TABLE jobs ADD COLUMN rejection_reason TEXT")
+        if "approval_reason" not in columns:
+            db.execute("ALTER TABLE jobs ADD COLUMN approval_reason TEXT")
         memory_columns = {row[1] for row in db.execute("PRAGMA table_info(memories)")}
         if "event_date" not in memory_columns:
             db.execute("ALTER TABLE memories ADD COLUMN event_date TEXT")
         if "expires_at" not in memory_columns:
             db.execute("ALTER TABLE memories ADD COLUMN expires_at INTEGER")
+        if "confidence" not in memory_columns:
+            db.execute("ALTER TABLE memories ADD COLUMN confidence REAL")
+
+
+def generate_json(prompt_name, message):
+    payload = {
+        "model": setting("MEMGINE_EXTRACT_MODEL"),
+        "temperature": float(setting("MEMGINE_EXTRACT_TEMPERATURE")),
+        "max_tokens": int(setting("MEMGINE_EXTRACT_MAX_TOKENS")),
+        "chat_template_kwargs": {"enable_thinking": False},
+        "messages": [{"role": "system", "content": active_prompt(prompt_name, ui_settings.read_config())},
+                     {"role": "user", "content": json.dumps(message, ensure_ascii=False)}],
+    }
+    request = Request(
+        setting("MEMGINE_EXTRACT_URL"),
+        data=json.dumps(payload).encode(), headers={"Content-Type": "application/json"},
+    )
+    with urlopen(request, timeout=float(setting("MEMGINE_EXTRACT_TIMEOUT"))) as response:
+        try:
+            choice = json.load(response)["choices"][0]
+            finish_reason = choice["finish_reason"]
+            if finish_reason == "length":
+                raise ValueError(f"Model hit max_tokens={payload['max_tokens']}")
+            if finish_reason != "stop":
+                raise ValueError("Model did not finish normally")
+            content = choice["message"]["content"]
+            if not isinstance(content, str):
+                raise ValueError("Model response content is not text")
+            if prompt_name in ("dreaming", "critic"):
+                fenced = re.fullmatch(r"```(?:json)?[ \t]*\r?\n(.*?)\r?\n```", content.strip(), re.IGNORECASE | re.DOTALL)
+                if fenced:
+                    content = fenced[1]
+            return json.loads(content)
+        except (KeyError, IndexError, TypeError) as error:
+            raise ValueError("Invalid model response") from error
+
+
+def dreaming_sources(db, scope, source_ids=()):
+    condition = (" AND id IN (" + ",".join("?" for _ in source_ids) + ")"
+                 if source_ids else " ORDER BY rowid DESC LIMIT 24")
+    return db.execute(
+        """SELECT id, text FROM memories
+           WHERE client=? AND user_id=? AND model_id=? AND active=1
+             AND kind IN ('profile', 'context') AND (expires_at IS NULL OR expires_at > unixepoch())
+             AND NOT EXISTS (
+                 SELECT 1 FROM jobs WHERE jobs.id=memories.id AND jobs.message_id LIKE 'dreaming:%'
+             )
+           """ + condition, (*scope, *source_ids),
+    ).fetchall()
+
+
+def dream(db, client, body):
+    scope = (client, required(body, "user_id"), required(body, "model_id"))
+    rows = dreaming_sources(db, scope)
+    if len(rows) < 2:
+        return 200, {"job": None}
+    sources = dict(rows)
+    stage = "dreaming"
+    try:
+        proposal = generate_json("dreaming", {
+            "instruction": "Return only one JSON object with text, source_ids (at least two), and confidence, or {}. No reasoning, Markdown, or commentary.",
+            "memories": [{"id": source_id, "text": text} for source_id, text in rows],
+        })
+        if proposal == {}:
+            return 200, {"job": None}
+        if not isinstance(proposal, dict):
+            raise ValueError("Invalid Dreaming proposal")
+        text = required(proposal, "text", 500).strip()
+        ids = proposal.get("source_ids")
+        score = proposal.get("confidence")
+        if (not isinstance(ids, list) or not 2 <= len(ids) <= len(rows)
+                or any(not isinstance(source_id, str) or source_id not in sources for source_id in ids)
+                or len(set(ids)) != len(ids) or type(score) not in (int, float) or not 0 <= score <= 1):
+            raise ValueError("Invalid Dreaming sources or confidence")
+        stage = "critic"
+        verdict = generate_json("critic", {
+            "instruction": "Return only one JSON object: supported (boolean), confidence (number from 0 to 1). No reasoning, Markdown, or commentary.",
+            "text": text,
+            "sources": [{"id": source_id, "text": sources[source_id]} for source_id in ids],
+        })
+        if not isinstance(verdict, dict) or type(verdict.get("supported")) is not bool:
+            raise ValueError("Invalid critic response")
+        if not verdict["supported"]:
+            return 200, {"job": None}
+        critic_score = verdict.get("confidence")
+        if type(critic_score) not in (int, float) or not 0 <= critic_score <= 1:
+            raise ValueError("Invalid critic confidence")
+    except (OSError, ValueError) as error:
+        if isinstance(error, json.JSONDecodeError):
+            detail = "Invalid JSON"
+        elif isinstance(error, OSError):
+            detail = type(error).__name__
+        else:
+            detail = str(error)
+        LOG.warning("dreaming_model_failed stage=%s reason=%s", stage, detail)
+        return 502, {"error": f"{stage}: {detail}"}
+
+    proposal = {"action": "add", "kind": "context", "text": text,
+                "source_ids": sorted(ids), "confidence": min(score, critic_score)}
+    message_id = "dreaming:" + hashlib.sha256(json.dumps(
+        [proposal["source_ids"], text.casefold()], ensure_ascii=False
+    ).encode()).hexdigest()
+    with db:
+        db.execute("BEGIN IMMEDIATE")
+        if not set(ids).issubset(dict(dreaming_sources(db, scope, ids))):
+            return 409, {"error": "Dreaming sources changed during generation"}
+        db.execute(
+            """INSERT INTO jobs (id,client,user_id,model_id,conversation_id,message_id,text,status,proposal,review_required)
+               VALUES (?,?,?,?,'',?,?,'review',?,1)
+               ON CONFLICT(client,user_id,model_id,conversation_id,message_id) DO NOTHING""",
+            (uuid4().hex, *scope, message_id, "\n".join(sources[source_id] for source_id in ids),
+             json.dumps(proposal, ensure_ascii=False)),
+        )
+        job_id, status, saved = db.execute(
+            "SELECT id,status,proposal FROM jobs WHERE client=? AND user_id=? AND model_id=? AND conversation_id='' AND message_id=?",
+            (*scope, message_id),
+        ).fetchone()
+    return 200, {"job": {
+        "job_id": job_id, "status": status, "proposal": json.loads(saved),
+        "sources": [{"id": source_id, "text": sources[source_id]} for source_id in ids],
+    }}
 
 
 def extract(text, candidates=(), context=None):
@@ -337,23 +511,7 @@ def extract(text, candidates=(), context=None):
     if local_date:
         message.update({"local_date": local_date.isoformat(), "timezone": context["timezone"],
                         "tomorrow": (local_date + timedelta(days=1)).isoformat()})
-    payload = {
-        "model": setting("MEMGINE_EXTRACT_MODEL"),
-        "temperature": float(setting("MEMGINE_EXTRACT_TEMPERATURE")),
-        "max_tokens": int(setting("MEMGINE_EXTRACT_MAX_TOKENS")),
-        "chat_template_kwargs": {"enable_thinking": False},
-        "messages": [{"role": "system", "content": SYSTEM_PROMPT},
-                     {"role": "user", "content": json.dumps(message, ensure_ascii=False)}],
-    }
-    request = Request(
-        setting("MEMGINE_EXTRACT_URL"),
-        data=json.dumps(payload).encode(), headers={"Content-Type": "application/json"},
-    )
-    with urlopen(request, timeout=float(setting("MEMGINE_EXTRACT_TIMEOUT"))) as response:
-        choice = json.load(response)["choices"][0]
-    if choice["finish_reason"] != "stop":
-        raise ValueError("Incomplete extraction response")
-    proposal = json.loads(choice["message"]["content"])
+    proposal = generate_json("extraction", message)
     if not isinstance(proposal, dict):
         raise ValueError("Expected an extraction object")
     if proposal.get("action") == "skip":
@@ -362,6 +520,9 @@ def extract(text, candidates=(), context=None):
     if action not in ("add", "supersede") or kind not in ("profile", "project", "context"):
         raise ValueError("Invalid extraction action or kind")
     result = {"action": action, "kind": kind, "text": required(proposal, "text", 500).strip()}
+    confidence = proposal.get("confidence")
+    if type(confidence) in (int, float) and 0 <= confidence <= 1 and math.isfinite(confidence):
+        result["confidence"] = confidence
     if proposal.get("event_date") is not None:
         try:
             value = proposal["event_date"]
@@ -555,13 +716,14 @@ class Handler(BaseHTTPRequestHandler):
                 return
         operation = {
             "/v1/admin/logs": read_logs,
-            "/v1/admin/settings": lambda db, client, body: (200, {"sections": ui_settings.fields()}),
+            "/v1/admin/settings": lambda db, client, body: (200, {"sections": ui_settings.fields(), "prompts": prompt_fields(ui_settings.read_config())}),
             "/v1/admin/settings/save": save_ui_settings,
             "/v1/admin/settings/services": service_control,
             "/v1/admin/settings/browse": lambda db, client, body: (
                 200, ui_settings.browse(body.get("path", ""), body.get("kind"))
             ),
             "/v1/memory/search": search,
+            "/v1/memory/dream": dream,
             "/v1/memory/list": list_memories,
             "/v1/memory/edit": edit_memory,
             "/v1/memory/delete": delete_memory,
