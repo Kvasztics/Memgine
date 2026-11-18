@@ -66,3 +66,7 @@ The proxy exposes `GET /v1/models` and `POST /v1/chat/completions`. Configure `[
 - Evaluate weighted topic ranking once the consolidation workflow has more test coverage.
 
 See [BENCHMARKS.md](BENCHMARKS.md) for the evaluation checklist.
+
+## License
+
+Memgine is licensed under the [Apache License 2.0](LICENSE). Separately supplied models, binaries, and other third-party components retain their respective licenses.
