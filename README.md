@@ -2,6 +2,8 @@
 
 Memgine gives local AI assistants a memory you can inspect and edit. It extracts candidate memories from conversation messages, stores approved memories in SQLite, and retrieves relevant context for later conversations.
 
+![Memgine Memories tab with filters and an editable memory](docs/memgine_screen.jpg)
+
 ## Features
 
 - **Memory review** — approve, edit, or dismiss suggestions, with optional feedback. Edit saved memories and their confidence scores.
